@@ -227,35 +227,52 @@ Response:"""
         
         try:
             response_text = await self.generate_completion(prompt)
+            logger.info(f"🧹 Raw response from Ollama: {response_text[:500]}...")
             
-            # Clean up the response
-            if '```json' in response_text:
-                response_text = response_text.split('```json')[1].split('```')[0]
-            elif '```' in response_text:
-                response_text = response_text.split('```')[1]
+            # Clean up the response with improved parsing
+            cleaned_text = self._clean_and_extract_json(response_text)
+            logger.info(f"🔍 Cleaned JSON text: {cleaned_text[:300]}...")
             
-            response_text = response_text.strip()
+            # Try multiple parsing strategies
+            parsed = None
             
-            # Try to find JSON in the response
-            start_idx = response_text.find('{')
-            end_idx = response_text.rfind('}') + 1
-            
-            if start_idx != -1 and end_idx != -1:
-                json_str = response_text[start_idx:end_idx]
-                parsed = json.loads(json_str)
+            # Strategy 1: Direct JSON parsing
+            try:
+                parsed = json.loads(cleaned_text)
+                logger.info("✅ Direct JSON parsing successful")
+            except json.JSONDecodeError as e:
+                logger.warning(f"⚠️ Direct parsing failed: {str(e)}")
                 
-                return {
-                    'schema': parsed.get('schema', {}),
-                    'detected_domain': parsed.get('detected_domain', domain),
-                    'estimated_rows': parsed.get('estimated_rows', 100),
-                    'suggestions': parsed.get('suggestions', [])
-                }
-            else:
-                raise ValueError("No valid JSON found in response")
+                # Strategy 2: Fix common JSON issues
+                try:
+                    fixed_json = self._fix_common_json_issues(cleaned_text)
+                    parsed = json.loads(fixed_json)
+                    logger.info("✅ Fixed JSON parsing successful")
+                except json.JSONDecodeError as e2:
+                    logger.warning(f"⚠️ Fixed parsing failed: {str(e2)}")
+                    
+                    # Strategy 3: Extract and rebuild JSON structure
+                    try:
+                        parsed = self._extract_and_rebuild_json(cleaned_text)
+                        logger.info("✅ Rebuilt JSON parsing successful")
+                    except Exception as e3:
+                        logger.error(f"❌ All parsing strategies failed: {str(e3)}")
+                        raise Exception(f"Invalid JSON response from Ollama: {str(e)}")
+            
+            if not parsed:
+                raise ValueError("Could not parse JSON response")
+                
+            return {
+                'schema': parsed.get('schema', {}),
+                'detected_domain': parsed.get('detected_domain', domain),
+                'estimated_rows': parsed.get('estimated_rows', 100),
+                'suggestions': parsed.get('suggestions', [])
+            }
                 
         except json.JSONDecodeError as e:
             logger.error(f"❌ JSON parse error: {str(e)}")
-            raise Exception("Invalid JSON response from Ollama")
+            logger.error(f"❌ Problematic response: {response_text[:1000]}...")
+            raise Exception(f"Invalid JSON response from Ollama: {str(e)}")
         except Exception as e:
             logger.error(f"❌ Schema generation failed: {str(e)}")
             raise Exception(f"Local AI schema generation failed: {str(e)}")
@@ -515,6 +532,105 @@ Response:"""
         else:
             # Avoid generic "Sample" text
             return f"{field_name.replace('_', ' ').title()} {index + 1}"
+
+    def _clean_and_extract_json(self, text: str) -> str:
+        """Clean and extract JSON from AI response"""
+        # Remove markdown formatting
+        if '```json' in text:
+            text = text.split('```json')[1].split('```')[0]
+        elif '```' in text:
+            text = text.split('```')[1]
+        
+        # Clean up the text
+        text = text.strip()
+        
+        # Find JSON object boundaries
+        start_idx = text.find('{')
+        end_idx = text.rfind('}') + 1
+        
+        if start_idx != -1 and end_idx > start_idx:
+            return text[start_idx:end_idx]
+        
+        return text
+
+    def _fix_common_json_issues(self, json_str: str) -> str:
+        """Fix common JSON formatting issues"""
+        import re
+        
+        # Replace single quotes with double quotes (but not inside strings)
+        json_str = re.sub(r"'([^']*)':", r'"\1":', json_str)
+        json_str = re.sub(r": '([^']*)'", r': "\1"', json_str)
+        
+        # Fix trailing commas
+        json_str = re.sub(r',(\s*[}\]])', r'\1', json_str)
+        
+        # Fix missing quotes around keys
+        json_str = re.sub(r'([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)\s*:', r'\1"\2":', json_str)
+        
+        # Remove comments
+        json_str = re.sub(r'//.*?\n', '\n', json_str)
+        json_str = re.sub(r'/\*.*?\*/', '', json_str, flags=re.DOTALL)
+        
+        # Clean up whitespace
+        json_str = ' '.join(json_str.split())
+        
+        return json_str
+
+    def _extract_and_rebuild_json(self, text: str) -> Dict[str, Any]:
+        """Extract and rebuild JSON structure from malformed text"""
+        import re
+        
+        # Try to extract key-value pairs manually
+        result = {"schema": {}, "detected_domain": "general", "estimated_rows": 100, "suggestions": []}
+        
+        # Extract schema section
+        schema_match = re.search(r'"schema"\s*:\s*\{([^}]+)\}', text, re.DOTALL)
+        if schema_match:
+            schema_content = schema_match.group(1)
+            # Parse field definitions
+            field_matches = re.findall(r'"([^"]+)"\s*:\s*\{([^}]+)\}', schema_content)
+            for field_name, field_content in field_matches:
+                field_data = {}
+                
+                # Extract type
+                type_match = re.search(r'"type"\s*:\s*"([^"]+)"', field_content)
+                if type_match:
+                    field_data["type"] = type_match.group(1)
+                
+                # Extract description
+                desc_match = re.search(r'"description"\s*:\s*"([^"]+)"', field_content)
+                if desc_match:
+                    field_data["description"] = desc_match.group(1)
+                
+                # Extract examples
+                examples_match = re.search(r'"examples"\s*:\s*\[([^\]]+)\]', field_content)
+                if examples_match:
+                    examples_str = examples_match.group(1)
+                    examples = re.findall(r'"([^"]+)"', examples_str)
+                    field_data["examples"] = examples
+                
+                # Set constraints
+                field_data["constraints"] = {"required": True}
+                
+                result["schema"][field_name] = field_data
+        
+        # Extract other fields
+        domain_match = re.search(r'"detected_domain"\s*:\s*"([^"]+)"', text)
+        if domain_match:
+            result["detected_domain"] = domain_match.group(1)
+        
+        rows_match = re.search(r'"estimated_rows"\s*:\s*(\d+)', text)
+        if rows_match:
+            result["estimated_rows"] = int(rows_match.group(1))
+        
+        # Extract suggestions
+        suggestions_match = re.search(r'"suggestions"\s*:\s*\[([^\]]+)\]', text)
+        if suggestions_match:
+            suggestions_str = suggestions_match.group(1)
+            suggestions = re.findall(r'"([^"]+)"', suggestions_str)
+            result["suggestions"] = suggestions
+        
+        return result
 
     async def analyze_data_comprehensive(
         self,

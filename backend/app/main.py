@@ -120,21 +120,44 @@ async def root():
 
 @app.get("/api/health")
 async def health_check():
-    """Health check endpoint"""
-    # Check AI services health
+    """Health check endpoint with dynamic AI service status"""
+    # Check configured AI service first
+    ai_service_status = None
+    if ai_service.is_initialized:
+        try:
+            ai_service_status = await ai_service.health_check()
+        except Exception as e:
+            logger.warning(f"⚠️ AI service health check failed: {str(e)}")
+            ai_service_status = {
+                "status": "error",
+                "provider": ai_service.current_provider,
+                "model": ai_service.current_model,
+                "message": str(e)
+            }
+    
+    # Also check individual services for fallback status
     gemini_status = await gemini_service.health_check()
     ollama_status = await ollama_service.health_check()
     
     # Determine overall AI availability
-    ai_available = gemini_status.get("status") == "online" or ollama_status.get("status") == "online"
+    ai_available = (ai_service_status and ai_service_status.get("status") == "online") or \
+                   gemini_status.get("status") == "online" or \
+                   ollama_status.get("status") == "online"
     
     health_status = {
         "status": "healthy",
         "timestamp": datetime.utcnow().isoformat(),
         "version": "1.0.0",
-        "environment": "production",
+        "environment": "production", 
         "message": "DataGenesis AI is running",
         "ai_available": ai_available,
+        "ai_service": ai_service_status or {
+            "status": "not_configured",
+            "provider": "unknown",
+            "model": "unknown",
+            "api_key_configured": False,
+            "quota_preserved": False
+        },
         "services": {
             "gemini": gemini_status,
             "ollama": ollama_status,

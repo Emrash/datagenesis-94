@@ -8,11 +8,13 @@ export interface SystemStatusData {
     responseTime: number;
     error?: string;
   };
-  gemini: {
-    status: 'online' | 'offline' | 'unknown';
+  ai_service: {
+    provider: 'gemini' | 'openai' | 'anthropic' | 'ollama' | 'unknown';
+    status: 'online' | 'offline' | 'unknown' | 'quota_exceeded';
     model: string;
     quotaPreserved: boolean;
     apiKeyConfigured: boolean;
+    endpoint?: string;
   };
   agents: {
     active: boolean;
@@ -33,7 +35,13 @@ export interface SystemStatusData {
 export const useSystemStatus = (checkInterval = 30000) => {
   const [status, setStatus] = useState<SystemStatusData>({
     backend: { healthy: false, lastCheck: null, responseTime: 0 },
-    gemini: { status: 'unknown', model: 'gemini-2.0-flash-exp', quotaPreserved: false, apiKeyConfigured: false },
+    ai_service: { 
+      provider: 'unknown', 
+      status: 'unknown', 
+      model: 'unknown', 
+      quotaPreserved: false, 
+      apiKeyConfigured: false 
+    },
     agents: { active: false, total: 5, operational: 0 },
     websockets: { connected: false, status: 'disconnected' },
     overall: { status: 'unhealthy', message: 'Checking system status...' }
@@ -59,11 +67,13 @@ export const useSystemStatus = (checkInterval = 30000) => {
           responseTime,
           error: healthResponse.healthy ? undefined : 'Connection failed'
         },
-        gemini: {
-          status: healthResponse.data?.services?.gemini?.status === 'ready' ? 'online' : 'online',
-          model: healthResponse.data?.services?.gemini?.model || 'gemini-2.0-flash-exp',
-          quotaPreserved: healthResponse.data?.services?.gemini?.quota_preserved || false,
-          apiKeyConfigured: healthResponse.data?.services?.gemini?.api_key_configured || false
+        ai_service: {
+          provider: (healthResponse.data?.ai_service?.provider as any) || 'unknown',
+          status: healthResponse.data?.ai_service?.status || 'unknown',
+          model: healthResponse.data?.ai_service?.model || 'unknown',
+          quotaPreserved: healthResponse.data?.ai_service?.quota_preserved || false,
+          apiKeyConfigured: healthResponse.data?.ai_service?.api_key_configured || false,
+          endpoint: healthResponse.data?.ai_service?.endpoint
         },
         agents: {
           active: healthResponse.data?.services?.agents === 'active',
@@ -99,7 +109,7 @@ export const useSystemStatus = (checkInterval = 30000) => {
       }
 
       // Determine overall system status
-      if (newStatus.backend.healthy && newStatus.gemini.status === 'online' && newStatus.agents.active) {
+      if (newStatus.backend.healthy && newStatus.ai_service.status === 'online' && newStatus.agents.active) {
         newStatus.overall = {
           status: 'healthy',
           message: 'All systems operational - Full AI generation available'
@@ -107,8 +117,8 @@ export const useSystemStatus = (checkInterval = 30000) => {
       } else if (newStatus.backend.healthy) {
         newStatus.overall = {
           status: 'degraded',
-          message: newStatus.gemini.status === 'offline' 
-            ? 'Backend healthy, Gemini offline - Local generation available'
+          message: newStatus.ai_service.status === 'offline' 
+            ? `Backend healthy, ${newStatus.ai_service.provider} offline - Local generation available`
             : 'Partial functionality available'
         };
       } else {
@@ -130,7 +140,13 @@ export const useSystemStatus = (checkInterval = 30000) => {
           responseTime: 0,
           error: error instanceof Error ? error.message : 'Unknown error'
         },
-        gemini: { status: 'offline', model: 'gemini-2.0-flash-exp', quotaPreserved: false, apiKeyConfigured: false },
+        ai_service: { 
+          provider: 'unknown', 
+          status: 'offline', 
+          model: 'unknown', 
+          quotaPreserved: false, 
+          apiKeyConfigured: false 
+        },
         agents: { active: false, total: 5, operational: 0 },
         websockets: { connected: false, status: 'error' },
         overall: { status: 'unhealthy', message: 'System health check failed' }
@@ -166,7 +182,7 @@ export const useSystemStatus = (checkInterval = 30000) => {
     isDegraded: status.overall.status === 'degraded',
     isUnhealthy: status.overall.status === 'unhealthy',
     backendHealthy: status.backend.healthy,
-    geminiOnline: status.gemini.status === 'online',
+    aiServiceOnline: status.ai_service.status === 'online',
     agentsActive: status.agents.active
   };
 };
